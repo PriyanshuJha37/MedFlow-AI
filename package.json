@@ -1,0 +1,21 @@
+{
+  "name": "medflow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MedFlow — healthcare resource management platform prototype for Delhi-NCR PHCs",
+  "scripts": {
+    "install:backend": "cd backend && npm install",
+    "install:frontend": "cd frontend && npm install",
+    "install:analytics": "pip install -r analytics/requirements.txt",
+    "install:all": "npm run install:backend && npm run install:frontend && npm run install:analytics",
+    "migrate": "cd backend && npx prisma migrate dev",
+    "seed": "cd backend && npx prisma db seed",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:analytics": "cd analytics && uvicorn main:app --reload --port 8001",
+    "dev:all": "concurrently -n backend,frontend,analytics -c blue,green,yellow \"npm:dev:backend\" \"npm:dev:frontend\" \"npm:dev:analytics\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

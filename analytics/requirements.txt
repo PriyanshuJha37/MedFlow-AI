@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+numpy
+pandas
+statsmodels
+pydantic
+httpx
+python-dotenv

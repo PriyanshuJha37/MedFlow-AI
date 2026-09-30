@@ -1,0 +1,377 @@
+// MedFlow — Prisma Schema
+// Single PostgreSQL database. Current-state tables + append-only historical events.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- enums ----------
+enum Role {
+  admin
+  phc_staff
+}
+
+enum MedicineCategory {
+  Antibiotic
+  Antipyretic
+  Fluid
+  Antimalarial
+  Cardiac
+  Respiratory
+  Ophthalmic
+  Vaccine
+  Kits
+  Other
+}
+
+enum MedicineUnit {
+  Tablet
+  Bottle
+  Injection
+  Kit
+  ml
+  mg
+  Strip
+}
+
+enum MedicineEventReason {
+  received
+  dispensed
+  wasted
+  transfer_in
+  transfer_out
+}
+
+enum FootfallEventSource {
+  manual
+  simulation
+  scenario
+}
+
+enum BedEventReason {
+  admission
+  discharge
+  emergency_reserve_change
+  transfer
+}
+
+enum StaffRole {
+  Doctor
+  Nurse
+  Pharmacist
+  LabTech
+  Admin
+  Support
+}
+
+enum EmergencyType {
+  Dengue
+  Cardiac
+  Respiratory
+  MassCasualty
+  Other
+}
+
+enum Severity {
+  low
+  moderate
+  high
+}
+
+enum TransferStatus {
+  proposed
+  approved
+  rejected
+  executed
+}
+
+enum TransferProposedBy {
+  ai
+  manual
+}
+
+enum AlertType {
+  stockout
+  bed_crowding
+  staff_shortage
+  emergency
+  anomaly
+}
+
+enum AlertSeverity {
+  info
+  warning
+  critical
+}
+
+// ---------- core tables ----------
+model Phc {
+  id                   Int                      @id @default(autoincrement())
+  name                 String
+  city                 String
+  zone                 String
+  catchmentPopulation  Int
+  totalBeds            Int
+  totalStaff           Int
+  lat                  Float?
+  lng                  Float?
+  createdAt            DateTime                 @default(now())
+
+  users                User[]
+  medicineInventories  MedicineInventory[]
+  phcStatus            PhcStatus?
+  dailyFootfallAggs    DailyFootfallAggregate[]
+  staffRoster          StaffRoster[]
+  medicineEvents       MedicineEvent[]
+  footfallEvents       FootfallEvent[]
+  bedEvents            BedEvent[]
+  attendanceEvents     AttendanceEvent[]
+  emergencyEvents      EmergencyEvent[]
+  transferSource       TransferProposal[]       @relation("TransferSource")
+  transferDest         TransferProposal[]       @relation("TransferDest")
+  alerts               Alert[]
+
+  @@index([city, zone])
+}
+
+model User {
+  id            Int       @id @default(autoincrement())
+  username      String    @unique
+  passwordHash  String
+  role          Role
+  phcId         Int?
+  displayName   String
+  createdAt     DateTime  @default(now())
+
+  phc           Phc?      @relation(fields: [phcId], references: [id], onDelete: SetNull)
+
+  medicineEvents   MedicineEvent[]
+  footfallEvents   FootfallEvent[]
+  bedEvents        BedEvent[]
+  attendanceEvents AttendanceEvent[]
+  emergencyReports EmergencyEvent[] @relation("EmergencyReporter")
+  emergencyResolves EmergencyEvent[] @relation("EmergencyResolver")
+  transferDecisions TransferProposal[]
+}
+
+model Medicine {
+  id                                    Int               @id @default(autoincrement())
+  name                                  String            @unique
+  genericName                           String?
+  category                              MedicineCategory  @default(Other)
+  unit                                  MedicineUnit      @default(Tablet)
+  defaultDailyConsumptionPer100Patients Float             @default(10.0)
+  reorderLevel                          Int               @default(100)
+  criticalLevel                         Int               @default(30)
+  daysOfStockWarning                    Int               @default(7)
+  createdAt                             DateTime          @default(now())
+
+  inventories  MedicineInventory[]
+  events       MedicineEvent[]
+  transfers    TransferProposal[]
+}
+
+// ---------- current state ----------
+model MedicineInventory {
+  id              Int       @id @default(autoincrement())
+  phcId           Int
+  medicineId      Int
+  currentQuantity Int
+  lastUpdated     DateTime  @default(now()) @updatedAt
+
+  phc      Phc      @relation(fields: [phcId], references: [id], onDelete: Cascade)
+  medicine Medicine @relation(fields: [medicineId], references: [id], onDelete: Cascade)
+  events   MedicineEvent[]
+
+  @@unique([phcId, medicineId])
+  @@index([phcId])
+  @@index([medicineId])
+}
+
+model PhcStatus {
+  id                    Int       @id @default(autoincrement())
+  phcId                 Int       @unique
+  bedsTotal             Int
+  bedsOccupied          Int       @default(0)
+  bedsEmergencyReserved Int       @default(0)
+  staffTotal            Int
+  staffOnDuty           Int       @default(0)
+  activeEmergency       Boolean   @default(false)
+  lastPatientCount      Int       @default(0)
+  lastUpdated           DateTime  @default(now()) @updatedAt
+
+  phc Phc @relation(fields: [phcId], references: [id], onDelete: Cascade)
+}
+
+model DailyFootfallAggregate {
+  id              Int      @id @default(autoincrement())
+  phcId           Int
+  date            DateTime
+  outpatient      Int      @default(0)
+  admissions      Int      @default(0)
+  discharges      Int      @default(0)
+  triageMild      Int      @default(0)
+  triageModerate  Int      @default(0)
+  triageSevere    Int      @default(0)
+  lastUpdated     DateTime @default(now()) @updatedAt
+
+  phc Phc @relation(fields: [phcId], references: [id], onDelete: Cascade)
+
+  @@unique([phcId, date])
+  @@index([phcId, date])
+}
+
+model StaffRoster {
+  id              Int       @id @default(autoincrement())
+  phcId           Int
+  staffMemberName String
+  staffRole       StaffRole
+  isPresent       Boolean   @default(true)
+  lastMarked      DateTime  @default(now()) @updatedAt
+
+  phc               Phc               @relation(fields: [phcId], references: [id], onDelete: Cascade)
+  attendanceEvents  AttendanceEvent[]
+
+  @@index([phcId])
+}
+
+// ---------- historical events (append-only) ----------
+model MedicineEvent {
+  id          Int                 @id @default(autoincrement())
+  phcId       Int
+  medicineId  Int
+  inventoryId Int?
+  changeQty   Int
+  reason      MedicineEventReason
+  referenceId String?
+  operatorId  Int?
+  createdAt   DateTime            @default(now())
+
+  phc       Phc              @relation(fields: [phcId], references: [id], onDelete: Cascade)
+  medicine  Medicine         @relation(fields: [medicineId], references: [id], onDelete: Cascade)
+  inventory MedicineInventory? @relation(fields: [inventoryId], references: [id], onDelete: SetNull)
+  operator  User?            @relation(fields: [operatorId], references: [id], onDelete: SetNull)
+
+  @@index([phcId, createdAt(sort: Desc)])
+  @@index([medicineId, createdAt(sort: Desc)])
+  @@index([reason, createdAt(sort: Desc)])
+}
+
+model FootfallEvent {
+  id                Int                 @id @default(autoincrement())
+  phcId             Int
+  outpatientDelta   Int                 @default(0)
+  admissionsDelta   Int                 @default(0)
+  dischargesDelta   Int                 @default(0)
+  triageMildDelta   Int                 @default(0)
+  triageModerateDelta Int               @default(0)
+  triageSevereDelta   Int               @default(0)
+  source            FootfallEventSource @default(manual)
+  operatorId        Int?
+  createdAt         DateTime            @default(now())
+
+  phc      Phc   @relation(fields: [phcId], references: [id], onDelete: Cascade)
+  operator User? @relation(fields: [operatorId], references: [id], onDelete: SetNull)
+
+  @@index([phcId, createdAt(sort: Desc)])
+  @@index([source, createdAt(sort: Desc)])
+}
+
+model BedEvent {
+  id          Int            @id @default(autoincrement())
+  phcId       Int
+  occupiedDelta Int
+  reason      BedEventReason
+  operatorId  Int?
+  createdAt   DateTime       @default(now())
+
+  phc      Phc   @relation(fields: [phcId], references: [id], onDelete: Cascade)
+  operator User? @relation(fields: [operatorId], references: [id], onDelete: SetNull)
+
+  @@index([phcId, createdAt(sort: Desc)])
+}
+
+model AttendanceEvent {
+  id            Int       @id @default(autoincrement())
+  phcId         Int
+  staffRosterId Int
+  isPresent     Boolean
+  operatorId    Int
+  createdAt     DateTime  @default(now())
+
+  phc          Phc         @relation(fields: [phcId], references: [id], onDelete: Cascade)
+  staffRoster  StaffRoster @relation(fields: [staffRosterId], references: [id], onDelete: Cascade)
+  operator     User        @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+
+  @@index([phcId, createdAt(sort: Desc)])
+  @@index([staffRosterId, createdAt(sort: Desc)])
+}
+
+model EmergencyEvent {
+  id            Int          @id @default(autoincrement())
+  phcId         Int
+  type          EmergencyType
+  severity      Severity
+  patientCount  Int
+  notes         String?
+  isActive      Boolean      @default(true)
+  reportedById  Int
+  resolvedById  Int?
+  createdAt     DateTime     @default(now())
+  resolvedAt    DateTime?
+
+  phc           Phc        @relation(fields: [phcId], references: [id], onDelete: Cascade)
+  reportedBy    User       @relation("EmergencyReporter", fields: [reportedById], references: [id], onDelete: Cascade)
+  resolvedBy    User?      @relation("EmergencyResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  @@index([phcId, isActive, createdAt(sort: Desc)])
+  @@index([severity, createdAt(sort: Desc)])
+}
+
+// ---------- transfer workflow ----------
+model TransferProposal {
+  id            Int                @id @default(autoincrement())
+  sourcePhcId   Int
+  destPhcId     Int
+  medicineId    Int
+  proposedQty   Int
+  rationale     String
+  riskScore     Float
+  status        TransferStatus     @default(proposed)
+  proposedBy    TransferProposedBy @default(ai)
+  adminId       Int?
+  createdAt     DateTime           @default(now())
+  decidedAt     DateTime?
+  executedAt    DateTime?
+
+  sourcePhc  Phc      @relation("TransferSource", fields: [sourcePhcId], references: [id], onDelete: Cascade)
+  destPhc    Phc      @relation("TransferDest", fields: [destPhcId], references: [id], onDelete: Cascade)
+  medicine   Medicine @relation(fields: [medicineId], references: [id], onDelete: Cascade)
+  admin      User?    @relation(fields: [adminId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt(sort: Desc)])
+  @@index([sourcePhcId, status])
+  @@index([destPhcId, status])
+}
+
+// ---------- alerts ----------
+model Alert {
+  id            Int           @id @default(autoincrement())
+  phcId         Int?
+  type          AlertType
+  severity      AlertSeverity
+  message       String
+  relatedRowId  String?
+  dismissed     Boolean       @default(false)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @default(now()) @updatedAt
+
+  phc Phc? @relation(fields: [phcId], references: [id], onDelete: SetNull)
+
+  @@index([severity, dismissed, createdAt(sort: Desc)])
+  @@index([phcId, createdAt(sort: Desc)])
+}
